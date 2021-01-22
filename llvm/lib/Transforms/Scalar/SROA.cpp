@@ -94,6 +94,14 @@
 #include <utility>
 #include <vector>
 
+// Custom imports
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/SHA1.h"
+#include <unordered_set>
+
 using namespace llvm;
 using namespace llvm::sroa;
 
@@ -4787,7 +4795,86 @@ public:
     initializeSROALegacyPassPass(*PassRegistry::getPassRegistry());
   }
 
+  std::string hexStr(const char *data, int len) {     
+    constexpr char hexmap[] = {'0', '1', '2', '3', '4', '5', '6', '7',     
+                             '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+
+    std::string s(len * 2, ' ');     
+    for (int i = 0; i < len; ++i) {     
+      s[2 * i]     = hexmap[(data[i] & 0xF0) >> 4];     
+      s[2 * i + 1] = hexmap[data[i] & 0x0F];     
+    }     
+    return s;     
+  }
+
+  std::string hashString(StringRef S) {     
+    SHA1 Hasher;     
+    Hasher.update(S);     
+    StringRef Hexed = Hasher.final();     
+    return hexStr(Hexed.data(), Hexed.size());     
+  }
+
   bool runOnFunction(Function &F) override {
+
+    auto mod = CloneModule(*F.getParent());
+    std::vector<StringRef> functions;
+    for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
+      if(func->getName() != F.getName()) {
+        functions.push_back(func->getName());
+      }
+    }
+
+    std::unordered_set<std::string> globals_used;
+
+    for(auto f : functions) {
+      Function* func = mod->getFunction(f);
+
+      // if F uses func, delete body, else erase it
+      bool used = false;
+      for(User *U : F.users()) {
+        if(Instruction* call = dyn_cast<Instruction>(U)) {
+            Function* caller = call->getParent()->getParent();
+            if(caller->getName() == F.getName() && !used) {
+              func->deleteBody();
+              used = true;
+            }
+        } else if(GlobalValue* global_var = dyn_cast<GlobalValue>(U)) { // F using a global value
+          globals_used.insert(global_var->getGlobalIdentifier());
+        }
+      }
+
+      // F does not call func
+      if(!used) {
+        func->replaceAllUsesWith(UndefValue::get(func->getType())); 
+        func->eraseFromParent();
+      }
+    }
+
+    // remove all global values not used by F
+    for(GlobalValue G: mod->global_values()) {
+      if(globals_used.find(G.getGlobalIdentifier()) == globals_used.end()) {
+        G.eraseFromParent();
+      } else {
+        G.setInitializer(NULL);
+      }
+    }
+
+    std::string Data;
+    raw_string_ostream OS(Data);
+    WriteBitcodeToFile(*mod, OS);
+
+    Twine toHash = mod->getName() + F.getName();
+    std::string hashed = hashString(StringRef(toHash.str()));
+    std::string file ="/Users/peyton/UROP/CloudCompiler/data/SROA/" + hashed + ".csv";
+    StringRef fileName(file);
+
+    std::error_code EC;
+    raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
+    WriteBitcodeToFile(*mod, fdOS);
+
+    fdOS << mod->getName() << "," << F.getName() << "," << "SROA," << Data.size() << "\n\n";
+    fdOS << *mod;
+
     if (skipFunction(F))
       return false;
 

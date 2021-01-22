@@ -22,11 +22,20 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include <vector>
 
 using namespace llvm;
+
+// Custom imports
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/SHA1.h"
+
 
 #define DEBUG_TYPE "mem2reg"
 
@@ -78,10 +87,59 @@ struct PromoteLegacyPass : public FunctionPass {
   PromoteLegacyPass() : FunctionPass(ID) {
     initializePromoteLegacyPassPass(*PassRegistry::getPassRegistry());
   }
+  
+  std::string hexStr(const char *data, int len) {     
+    constexpr char hexmap[] = {'0', '1', '2', '3', '4', '5', '6', '7',     
+                             '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+
+    std::string s(len * 2, ' ');     
+    for (int i = 0; i < len; ++i) {     
+      s[2 * i]     = hexmap[(data[i] & 0xF0) >> 4];     
+      s[2 * i + 1] = hexmap[data[i] & 0x0F];     
+    }     
+    return s;     
+  }
+
+  std::string hashString(StringRef S) {     
+    SHA1 Hasher;     
+    Hasher.update(S);     
+    StringRef Hexed = Hasher.final();     
+    return hexStr(Hexed.data(), Hexed.size());     
+  }
 
   // runOnFunction - To run this pass, first we calculate the alloca
   // instructions that are safe for promotion, then we promote each one.
   bool runOnFunction(Function &F) override {
+
+    // auto mod = CloneModule(*F.getParent());
+    // std::vector<StringRef> functions;
+    // for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
+    //   if(func->getName() != F.getName()) {
+    //     functions.push_back(func->getName());
+    //   }
+    // }
+
+    // for(auto f : functions) {
+    //   Function* func = mod->getFunction(f);
+    //   func->replaceAllUsesWith(UndefValue::get(func->getType()));
+    //   func->eraseFromParent();
+    // }
+
+    // std::string Data;
+    // raw_string_ostream OS(Data);
+    // WriteBitcodeToFile(*mod, OS);
+
+
+    // Twine toHash = mod->getName() + F.getName();
+    // std::string hashed = hashString(StringRef(toHash.str()));
+    // std::string file ="/Users/peyton/UROP/CloudCompiler/data/ALAC_files/Mem2Reg/" + hashed + ".csv";
+    // StringRef fileName(file);
+
+    // std::error_code EC;
+    // raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
+
+    // fdOS << mod->getName() << "," << F.getName() << "," << Data.size() << "\n";
+
     if (skipFunction(F))
       return false;
 
