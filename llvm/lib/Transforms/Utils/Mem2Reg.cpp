@@ -109,44 +109,88 @@ struct PromoteLegacyPass : public FunctionPass {
 
   // runOnFunction - To run this pass, first we calculate the alloca
   // instructions that are safe for promotion, then we promote each one.
-  bool runOnFunction(Function &F) override {
+  bool runOnFunction(Function &F_to_serialize) override {
 
-    // auto mod = CloneModule(*F.getParent());
-    // std::vector<StringRef> functions;
-    // for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
-    //   if(func->getName() != F.getName()) {
-    //     functions.push_back(func->getName());
-    //   }
-    // }
+    auto mod = CloneModule(*F_to_serialize.getParent());
 
-    // for(auto f : functions) {
-    //   Function* func = mod->getFunction(f);
-    //   func->replaceAllUsesWith(UndefValue::get(func->getType()));
-    //   func->eraseFromParent();
-    // }
+    // get all functions that are not F and store names
+    std::vector<StringRef> functions;
+    for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
+      if(func->getName() != F_to_serialize.getName()) {
+        functions.push_back(func->getName());
+      }
+    }
 
-    // std::string Data;
-    // raw_string_ostream OS(Data);
-    // WriteBitcodeToFile(*mod, OS);
+    // go through all functions in the module except F
+    for(StringRef func_name : functions) {
+      Function* func = mod->getFunction(func_name);
 
+      // if F uses func, delete body, else erase it
+      bool used_by_F_to_serialize = false;
+      for(User *U : func->users()) {
+        if(Instruction* call = dyn_cast<Instruction>(U)) {
+          Function* caller = call->getParent()->getParent();
+          if(caller->getName() == F_to_serialize.getName()) {
+            func->deleteBody();
+            used_by_F_to_serialize = true;
+            break;
+          }
+        }
+      }
 
-    // Twine toHash = mod->getName() + F.getName();
-    // std::string hashed = hashString(StringRef(toHash.str()));
-    // std::string file ="/Users/peyton/UROP/CloudCompiler/data/ALAC_files/Mem2Reg/" + hashed + ".csv";
-    // StringRef fileName(file);
+      // F_to_serialize does not call func
+      if(!used_by_F_to_serialize) {
+        func->replaceAllUsesWith(UndefValue::get(func->getType())); 
+        func->eraseFromParent();
+      }
+    }
 
-    // std::error_code EC;
-    // raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
+    std::vector<std::string> unused_globals;
+    for(auto &G : mod->globals()) { // iterate over global variables in module
 
-    // fdOS << mod->getName() << "," << F.getName() << "," << Data.size() << "\n";
+      bool used_by_F_to_serialize = false;
+      for(User *U : G.users()) { // iterate over users of each global variable
+        if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
+          if(func_using_value->getName() == F_to_serialize.getName()) {
+            G.setInitializer(NULL);
+            used_by_F_to_serialize = true;
+            break;
+          }
+        }
+      }
 
-    if (skipFunction(F))
+      if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
+        unused_globals.push_back(G.getGlobalIdentifier());
+      }
+    }
+
+    // remove all global values not used by F_to_serialize
+    for(std::string global_id : unused_globals) {
+      GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
+      G->eraseFromParent();
+    }
+
+    std::string Data;
+    raw_string_ostream OS(Data);
+    WriteBitcodeToFile(*mod, OS);
+
+    Twine toHash = mod->getName() + F_to_serialize.getName();
+    std::string hashed = hashString(StringRef(toHash.str()));
+    std::string file ="/Users/peyton/UROP/CloudCompiler/data/Mem2Reg/" + hashed + ".csv";
+    StringRef fileName(file);
+
+    std::error_code EC;
+    raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
+
+    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "Mem2Reg," << Data.size() << "\n";
+
+    if (skipFunction(F_to_serialize))
       return false;
 
     DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     AssumptionCache &AC =
-        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-    return promoteMemoryToRegister(F, DT, AC);
+        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F_to_serialize);
+    return promoteMemoryToRegister(F_to_serialize, DT, AC);
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {

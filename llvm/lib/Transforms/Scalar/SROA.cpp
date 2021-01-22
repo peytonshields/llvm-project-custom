@@ -4814,73 +4814,87 @@ public:
     return hexStr(Hexed.data(), Hexed.size());     
   }
 
-  bool runOnFunction(Function &F) override {
+  bool runOnFunction(Function &F_to_serialize) override {
 
-    auto mod = CloneModule(*F.getParent());
+    auto mod = CloneModule(*F_to_serialize.getParent());
+
+    // get all functions that are not F and store names
     std::vector<StringRef> functions;
     for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
-      if(func->getName() != F.getName()) {
+      if(func->getName() != F_to_serialize.getName()) {
         functions.push_back(func->getName());
       }
     }
 
-    std::unordered_set<std::string> globals_used;
-
-    for(auto f : functions) {
-      Function* func = mod->getFunction(f);
+    // go through all functions in the module except F
+    for(StringRef func_name : functions) {
+      Function* func = mod->getFunction(func_name);
 
       // if F uses func, delete body, else erase it
-      bool used = false;
-      for(User *U : F.users()) {
+      bool used_by_F_to_serialize = false;
+      for(User *U : func->users()) {
         if(Instruction* call = dyn_cast<Instruction>(U)) {
-            Function* caller = call->getParent()->getParent();
-            if(caller->getName() == F.getName() && !used) {
-              func->deleteBody();
-              used = true;
-            }
-        } else if(GlobalValue* global_var = dyn_cast<GlobalValue>(U)) { // F using a global value
-          globals_used.insert(global_var->getGlobalIdentifier());
+          Function* caller = call->getParent()->getParent();
+          if(caller->getName() == F_to_serialize.getName()) {
+            func->deleteBody();
+            used_by_F_to_serialize = true;
+            break;
+          }
         }
       }
 
-      // F does not call func
-      if(!used) {
+      // F_to_serialize does not call func
+      if(!used_by_F_to_serialize) {
         func->replaceAllUsesWith(UndefValue::get(func->getType())); 
         func->eraseFromParent();
       }
     }
 
-    // remove all global values not used by F
-    for(GlobalValue G: mod->global_values()) {
-      if(globals_used.find(G.getGlobalIdentifier()) == globals_used.end()) {
-        G.eraseFromParent();
-      } else {
-        G.setInitializer(NULL);
+    std::vector<std::string> unused_globals;
+    for(auto &G : mod->globals()) { // iterate over global variables in module
+
+      bool used_by_F_to_serialize = false;
+      for(User *U : G.users()) { // iterate over users of each global variable
+        if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
+          if(func_using_value->getName() == F_to_serialize.getName()) {
+            G.setInitializer(NULL);
+            used_by_F_to_serialize = true;
+            break;
+          }
+        }
       }
+
+      if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
+        unused_globals.push_back(G.getGlobalIdentifier());
+      }
+    }
+
+    // remove all global values not used by F_to_serialize
+    for(std::string global_id : unused_globals) {
+      GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
+      G->eraseFromParent();
     }
 
     std::string Data;
     raw_string_ostream OS(Data);
     WriteBitcodeToFile(*mod, OS);
 
-    Twine toHash = mod->getName() + F.getName();
+    Twine toHash = mod->getName() + F_to_serialize.getName();
     std::string hashed = hashString(StringRef(toHash.str()));
     std::string file ="/Users/peyton/UROP/CloudCompiler/data/SROA/" + hashed + ".csv";
     StringRef fileName(file);
 
     std::error_code EC;
     raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
-    WriteBitcodeToFile(*mod, fdOS);
 
-    fdOS << mod->getName() << "," << F.getName() << "," << "SROA," << Data.size() << "\n\n";
-    fdOS << *mod;
+    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "SROA," << Data.size() << "\n";
 
-    if (skipFunction(F))
+    if (skipFunction(F_to_serialize))
       return false;
 
     auto PA = Impl.runImpl(
-        F, getAnalysis<DominatorTreeWrapperPass>().getDomTree(),
-        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F));
+        F_to_serialize, getAnalysis<DominatorTreeWrapperPass>().getDomTree(),
+        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F_to_serialize));
     return !PA.areAllPreserved();
   }
 
