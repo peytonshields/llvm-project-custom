@@ -4855,8 +4855,10 @@ public:
 
       bool used_by_F_to_serialize = false;
       for(User *U : G.users()) { // iterate over users of each global variable
-        if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
-          if(func_using_value->getName() == F_to_serialize.getName()) {
+
+        if(Instruction* call = dyn_cast<Instruction>(U)) {
+          Function* caller = call->getParent()->getParent();
+          if(caller->getName() == F_to_serialize.getName()) {
             G.setInitializer(NULL);
             used_by_F_to_serialize = true;
             break;
@@ -4872,6 +4874,7 @@ public:
     // remove all global values not used by F_to_serialize
     for(std::string global_id : unused_globals) {
       GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
+      G->replaceAllUsesWith(UndefValue::get(G->getType())); 
       G->eraseFromParent();
     }
 

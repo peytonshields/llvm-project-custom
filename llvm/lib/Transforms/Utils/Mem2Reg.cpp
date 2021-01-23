@@ -145,30 +145,30 @@ struct PromoteLegacyPass : public FunctionPass {
       }
     }
 
-    std::vector<std::string> unused_globals;
-    for(auto &G : mod->globals()) { // iterate over global variables in module
+    // std::vector<std::string> unused_globals;
+    // for(auto &G : mod->globals()) { // iterate over global variables in module
 
-      bool used_by_F_to_serialize = false;
-      for(User *U : G.users()) { // iterate over users of each global variable
-        if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
-          if(func_using_value->getName() == F_to_serialize.getName()) {
-            G.setInitializer(NULL);
-            used_by_F_to_serialize = true;
-            break;
-          }
-        }
-      }
+    //   bool used_by_F_to_serialize = false;
+    //   for(User *U : G.users()) { // iterate over users of each global variable
+    //     if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
+    //       if(func_using_value->getName() == F_to_serialize.getName()) {
+    //         G.setInitializer(NULL);
+    //         used_by_F_to_serialize = true;
+    //         break;
+    //       }
+    //     }
+    //   }
 
-      if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
-        unused_globals.push_back(G.getGlobalIdentifier());
-      }
-    }
+    //   if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
+    //     unused_globals.push_back(G.getGlobalIdentifier());
+    //   }
+    // }
 
-    // remove all global values not used by F_to_serialize
-    for(std::string global_id : unused_globals) {
-      GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
-      G->eraseFromParent();
-    }
+    // // remove all global values not used by F_to_serialize
+    // for(std::string global_id : unused_globals) {
+    //   GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
+    //   G->eraseFromParent();
+    // }
 
     std::string Data;
     raw_string_ostream OS(Data);
