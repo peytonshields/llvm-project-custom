@@ -4833,6 +4833,7 @@ public:
       // if F uses func, delete body, else erase it
       bool used_by_F_to_serialize = false;
       for(User *U : func->users()) {
+        errs() << "Function user: " << *U << "\n";
         if(Instruction* call = dyn_cast<Instruction>(U)) {
           Function* caller = call->getParent()->getParent();
           if(caller->getName() == F_to_serialize.getName()) {
@@ -4850,30 +4851,55 @@ public:
       }
     }
 
+
+    std::unordered_set<std::string> globals_used;
+    std::unordered_set<Constant*> constants_used;
+    for (const BasicBlock &BB : F_to_serialize) {
+      for (const Instruction &I : BB) {
+        for (const Value *Op : I.operands()) {
+          if (const GlobalValue* G = dyn_cast<GlobalValue>(Op)) {
+            globals_used.insert(G->getGlobalIdentifier());
+            errs() << "Global value: " << *G << "\n";
+          } else if(const Constant* C = dyn_cast<Constant>(Op)) {
+            constants_used.insert(C);
+          }
+        }
+      }
+    }
+
     std::vector<std::string> unused_globals;
     for(auto &G : mod->globals()) { // iterate over global variables in module
 
       bool used_by_F_to_serialize = false;
       for(User *U : G.users()) { // iterate over users of each global variable
-
+        errs() << "Global user: " << *U << "\n";
         if(Instruction* call = dyn_cast<Instruction>(U)) {
           Function* caller = call->getParent()->getParent();
           if(caller->getName() == F_to_serialize.getName()) {
+            errs() << "Setting " << G.getGlobalIdentifier() << " to null in function " << F_to_serialize.getName() << "\n";
             G.setInitializer(NULL);
+            break;
+          }
+        }
+        if(Constant* C = dyn_cast<Constant>(U)) {
+          errs() << "User is a constant: " << *C << " checking if in constants\n";
+          if(constants_used.find(*C) != constants_used.end()) {
             used_by_F_to_serialize = true;
             break;
           }
         }
       }
 
-      if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
+      if(!used_by_F_to_serialize && globals_used.find(G.getGlobalIdentifier()) == globals_used.end()) {
         unused_globals.push_back(G.getGlobalIdentifier());
+        errs() << F_to_serialize.getName() << " does not use " << G.getGlobalIdentifier() << " aka " << G << "\n";
       }
     }
 
-    // remove all global values not used by F_to_serialize
+    // remove all global variables not used by F_to_serialize
     for(std::string global_id : unused_globals) {
       GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
+      errs() << "Erasing " << global_id << " in " << F_to_serialize.getName() << "\n";
       G->replaceAllUsesWith(UndefValue::get(G->getType())); 
       G->eraseFromParent();
     }
