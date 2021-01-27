@@ -95,12 +95,14 @@
 #include <vector>
 
 // Custom imports
-#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Support/Compression.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SHA1.h"
-#include <unordered_set>
+#include <unordered_map>
 
 using namespace llvm;
 using namespace llvm::sroa;
@@ -4814,26 +4816,45 @@ public:
     return hexStr(Hexed.data(), Hexed.size());     
   }
 
+  bool usedBy(Function* F, Value* V, std::unordered_map<Value*, bool> &memo) {
+    if(memo.find(V) != memo.end()) {
+      return memo[V];
+    }
+
+    for(User *U : V->users()) {
+      if(auto *I = dyn_cast<Instruction>(U)) {
+        if(I->getFunction()->getName() == F->getName()) {
+          memo[V] = true;
+          return true;
+        }
+      } 
+      if(usedBy(F, U, memo)) {
+        return true;
+      }
+    }
+
+    memo[V] = false;
+    return false;
+  }
+
   bool runOnFunction(Function &F_to_serialize) override {
 
     auto mod = CloneModule(*F_to_serialize.getParent());
 
     // get all functions that are not F and store names
-    std::vector<StringRef> functions;
-    for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
-      if(func->getName() != F_to_serialize.getName()) {
-        functions.push_back(func->getName());
+    std::vector<Function*> functions;
+    for(auto &func : *mod) {
+      if(func.getName() != F_to_serialize.getName()) {
+        functions.push_back(&func);
       }
     }
 
     // go through all functions in the module except F
-    for(StringRef func_name : functions) {
-      Function* func = mod->getFunction(func_name);
+    for(auto func : functions) {
 
       // if F uses func, delete body, else erase it
       bool used_by_F_to_serialize = false;
       for(User *U : func->users()) {
-        errs() << "Function user: " << *U << "\n";
         if(Instruction* call = dyn_cast<Instruction>(U)) {
           Function* caller = call->getParent()->getParent();
           if(caller->getName() == F_to_serialize.getName()) {
@@ -4851,72 +4872,54 @@ public:
       }
     }
 
-
-    std::unordered_set<std::string> globals_used;
-    std::unordered_set<Constant*> constants_used;
-    for (const BasicBlock &BB : F_to_serialize) {
-      for (const Instruction &I : BB) {
-        for (const Value *Op : I.operands()) {
-          if (const GlobalValue* G = dyn_cast<GlobalValue>(Op)) {
-            globals_used.insert(G->getGlobalIdentifier());
-            errs() << "Global value: " << *G << "\n";
-          } else if(const Constant* C = dyn_cast<Constant>(Op)) {
-            constants_used.insert(C);
-          }
-        }
-      }
-    }
-
-    std::vector<std::string> unused_globals;
+    std::vector<GlobalVariable*> unused_globals;
     for(auto &G : mod->globals()) { // iterate over global variables in module
-
       bool used_by_F_to_serialize = false;
-      for(User *U : G.users()) { // iterate over users of each global variable
-        errs() << "Global user: " << *U << "\n";
-        if(Instruction* call = dyn_cast<Instruction>(U)) {
-          Function* caller = call->getParent()->getParent();
-          if(caller->getName() == F_to_serialize.getName()) {
-            errs() << "Setting " << G.getGlobalIdentifier() << " to null in function " << F_to_serialize.getName() << "\n";
-            G.setInitializer(NULL);
-            break;
-          }
-        }
-        if(Constant* C = dyn_cast<Constant>(U)) {
-          errs() << "User is a constant: " << *C << " checking if in constants\n";
-          if(constants_used.find(*C) != constants_used.end()) {
+
+      std::unordered_map<Value*, bool> memo;
+      for(User *U : G.users()) {
+        if(auto *I = dyn_cast<Instruction>(U)) {
+          if(I->getFunction()->getName() == F_to_serialize.getName()) {
+            G.setInitializer(NULL); 
             used_by_F_to_serialize = true;
-            break;
+            break; 
           }
+        } 
+        if(usedBy(&F_to_serialize, U, memo)) {
+          used_by_F_to_serialize = true;
+          break;
         }
       }
 
-      if(!used_by_F_to_serialize && globals_used.find(G.getGlobalIdentifier()) == globals_used.end()) {
-        unused_globals.push_back(G.getGlobalIdentifier());
-        errs() << F_to_serialize.getName() << " does not use " << G.getGlobalIdentifier() << " aka " << G << "\n";
+      if(!used_by_F_to_serialize) {
+        unused_globals.push_back(&G);
       }
     }
 
     // remove all global variables not used by F_to_serialize
-    for(std::string global_id : unused_globals) {
-      GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
-      errs() << "Erasing " << global_id << " in " << F_to_serialize.getName() << "\n";
-      G->replaceAllUsesWith(UndefValue::get(G->getType())); 
-      G->eraseFromParent();
+    for(auto global_var : unused_globals) {
+      global_var->replaceAllUsesWith(UndefValue::get(global_var->getType())); 
+      global_var->eraseFromParent();
     }
 
     std::string Data;
     raw_string_ostream OS(Data);
     WriteBitcodeToFile(*mod, OS);
+    SmallVector<char> buff;
+    auto error = zlib::compress(StringRef(Data), buff, 1);
+    if(error) {
+      abort();
+    }
 
     Twine toHash = mod->getName() + F_to_serialize.getName();
     std::string hashed = hashString(StringRef(toHash.str()));
-    std::string file ="/Users/peyton/UROP/CloudCompiler/data/SROA/" + hashed + ".csv";
+    std::string file ="/Users/peyton/UROP/CloudCompiler/data/compressed/SROA/" + hashed + ".csv";
     StringRef fileName(file);
 
     std::error_code EC;
     raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
 
-    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "SROA," << Data.size() << "\n";
+    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "SROA," << buff.size() << "\n";
 
     if (skipFunction(F_to_serialize))
       return false;

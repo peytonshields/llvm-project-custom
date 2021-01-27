@@ -35,6 +35,8 @@ using namespace llvm;
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SHA1.h"
+#include "llvm/Support/Compression.h"
+#include <unordered_map>
 
 
 #define DEBUG_TYPE "mem2reg"
@@ -107,23 +109,42 @@ struct PromoteLegacyPass : public FunctionPass {
     return hexStr(Hexed.data(), Hexed.size());     
   }
 
+  bool usedBy(Function* F, Value* V, std::unordered_map<Value*, bool> &memo) {
+    if(memo.find(V) != memo.end()) {
+      return memo[V];
+    }
+
+    for(User *U : V->users()) {
+      if(auto *I = dyn_cast<Instruction>(U)) {
+        if(I->getFunction()->getName() == F->getName()) {
+          memo[V] = true;
+          return true;
+        }
+      } 
+      if(usedBy(F, U, memo)) {
+        return true;
+      }
+    }
+
+    memo[V] = false;
+    return false;
+  }
+
   // runOnFunction - To run this pass, first we calculate the alloca
   // instructions that are safe for promotion, then we promote each one.
   bool runOnFunction(Function &F_to_serialize) override {
-
     auto mod = CloneModule(*F_to_serialize.getParent());
 
     // get all functions that are not F and store names
-    std::vector<StringRef> functions;
-    for(Module::iterator func=mod->begin(), E = mod->end(); func != E; ++func) {
-      if(func->getName() != F_to_serialize.getName()) {
-        functions.push_back(func->getName());
+    std::vector<Function*> functions;
+    for(auto &func : *mod) {
+      if(func.getName() != F_to_serialize.getName()) {
+        functions.push_back(&func);
       }
     }
 
     // go through all functions in the module except F
-    for(StringRef func_name : functions) {
-      Function* func = mod->getFunction(func_name);
+    for(auto func : functions) {
 
       // if F uses func, delete body, else erase it
       bool used_by_F_to_serialize = false;
@@ -145,44 +166,54 @@ struct PromoteLegacyPass : public FunctionPass {
       }
     }
 
-    // std::vector<std::string> unused_globals;
-    // for(auto &G : mod->globals()) { // iterate over global variables in module
+    std::vector<GlobalVariable*> unused_globals;
+    for(auto &G : mod->globals()) { // iterate over global variables in module
+      bool used_by_F_to_serialize = false;
 
-    //   bool used_by_F_to_serialize = false;
-    //   for(User *U : G.users()) { // iterate over users of each global variable
-    //     if(Function* func_using_value = dyn_cast<Function>(U)) { // check if user is F_to_serialize
-    //       if(func_using_value->getName() == F_to_serialize.getName()) {
-    //         G.setInitializer(NULL);
-    //         used_by_F_to_serialize = true;
-    //         break;
-    //       }
-    //     }
-    //   }
+      std::unordered_map<Value*, bool> memo;
+      for(User *U : G.users()) {
+        if(auto *I = dyn_cast<Instruction>(U)) {
+          if(I->getFunction()->getName() == F_to_serialize.getName()) {
+            G.setInitializer(NULL); 
+            used_by_F_to_serialize = true;
+            break; 
+          }
+        } 
+        if(usedBy(&F_to_serialize, U, memo)) {
+          used_by_F_to_serialize = true;
+          break;
+        }
+      }
 
-    //   if(!used_by_F_to_serialize) { // F_to_serialize does not used global variable
-    //     unused_globals.push_back(G.getGlobalIdentifier());
-    //   }
-    // }
+      if(!used_by_F_to_serialize) {
+        unused_globals.push_back(&G);
+      }
+    }
 
-    // // remove all global values not used by F_to_serialize
-    // for(std::string global_id : unused_globals) {
-    //   GlobalVariable* G = mod->getGlobalVariable(StringRef(global_id));
-    //   G->eraseFromParent();
-    // }
+    // remove all global variables not used by F_to_serialize
+    for(auto global_var : unused_globals) {
+      global_var->replaceAllUsesWith(UndefValue::get(global_var->getType())); 
+      global_var->eraseFromParent();
+    }
 
     std::string Data;
     raw_string_ostream OS(Data);
     WriteBitcodeToFile(*mod, OS);
+    SmallVector<char> buff;
+    auto error = zlib::compress(StringRef(Data), buff, 1);
+    if(error) {
+      abort();
+    }
 
     Twine toHash = mod->getName() + F_to_serialize.getName();
     std::string hashed = hashString(StringRef(toHash.str()));
-    std::string file ="/Users/peyton/UROP/CloudCompiler/data/Mem2Reg/" + hashed + ".csv";
+    std::string file ="/Users/peyton/UROP/CloudCompiler/data/compressed/Mem2Reg/" + hashed + ".csv";
     StringRef fileName(file);
 
     std::error_code EC;
     raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
 
-    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "Mem2Reg," << Data.size() << "\n";
+    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "Mem2Reg," << buff.size() << "\n";
 
     if (skipFunction(F_to_serialize))
       return false;
