@@ -4816,30 +4816,7 @@ public:
     return hexStr(Hexed.data(), Hexed.size());     
   }
 
-  bool usedBy(Function* F, Value* V, std::unordered_map<Value*, bool> &memo) {
-    if(memo.find(V) != memo.end()) {
-      return memo[V];
-    }
-
-    for(User *U : V->users()) {
-      if(auto *I = dyn_cast<Instruction>(U)) {
-        if(I->getFunction() == F) {
-          memo[V] = true;
-          return true;
-        }
-      } 
-      if(usedBy(F, U, memo)) {
-        memo[V] = true;
-        return true;
-      }
-    }
-
-    memo[V] = false;
-    return false;
-  }
-
-  bool runOnFunction(Function &F) override {
-
+  void extractFunction(Function &F, raw_ostream &OS) {
     auto mod = CloneModule(*F.getParent());
     Function* F_to_serialize = NULL; //pointer to F in the cloned module 
 
@@ -4901,32 +4878,36 @@ public:
       global_var->eraseFromParent();
     }
 
+    WriteBitcodeToFile(*mod, OS);
+  } 
+
+  bool runOnFunction(Function &F) override {
     std::string data;
     raw_string_ostream OS(data);
-    WriteBitcodeToFile(*mod, OS);
+    extractFunction(F, OS);
 
-    Twine to_hash = mod->getName() + F_to_serialize->getName();
-    std::string hashed = hashString(StringRef(to_hash.str()));
-    std::string file = "/Users/peyton/UROP/CloudCompiler/data/SROA/" + hashed + ".csv";
-    StringRef file_name(file);
+    // Twine to_hash = mod->getName() + F_to_serialize->getName();
+    // std::string hashed = hashString(StringRef(to_hash.str()));
+    // std::string file = "/Users/peyton/UROP/CloudCompiler/data/SROA/" + hashed + ".csv";
+    // StringRef file_name(file);
 
-    std::error_code EC;
-    raw_fd_ostream fd_OS(file_name, EC, llvm::sys::fs::OF_None);
+    // std::error_code EC;
+    // raw_fd_ostream fd_OS(file_name, EC, llvm::sys::fs::OF_None);
 
-    fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "SROA," << data.size() << "\n";
+    // fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "SROA," << data.size() << "\n";
 
-    SmallVector<char> buff;
-    auto error = zlib::compress(StringRef(data), buff, 1);
-    if(error) {
-      abort();
-    }
+    // SmallVector<char> buff;
+    // auto error = zlib::compress(StringRef(data), buff, 1);
+    // if(error) {
+    //   abort();
+    // }
 
-    std::string compressed_file ="/Users/peyton/UROP/CloudCompiler/data/compressed/SROA/" + hashed + ".csv";
-    StringRef compressed_file_name(compressed_file);
+    // std::string compressed_file ="/Users/peyton/UROP/CloudCompiler/data/compressed/SROA/" + hashed + ".csv";
+    // StringRef compressed_file_name(compressed_file);
 
-    std::error_code compressed_EC;
-    raw_fd_ostream compressed_fd_OS(compressed_file_name, compressed_EC, llvm::sys::fs::OF_None);
-    compressed_fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "SROA," << buff.size() << "\n";
+    // std::error_code compressed_EC;
+    // raw_fd_ostream compressed_fd_OS(compressed_file_name, compressed_EC, llvm::sys::fs::OF_None);
+    // compressed_fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "SROA," << buff.size() << "\n";
 
     if (skipFunction(F))
       return false;
