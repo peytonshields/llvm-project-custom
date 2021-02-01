@@ -37,6 +37,7 @@ using namespace llvm;
 #include "llvm/Support/SHA1.h"
 #include "llvm/Support/Compression.h"
 #include <unordered_map>
+#include <unordered_set>
 
 
 #define DEBUG_TYPE "mem2reg"
@@ -116,12 +117,13 @@ struct PromoteLegacyPass : public FunctionPass {
 
     for(User *U : V->users()) {
       if(auto *I = dyn_cast<Instruction>(U)) {
-        if(I->getFunction()->getName() == F->getName()) {
+        if(I->getFunction() == F) {
           memo[V] = true;
           return true;
         }
       } 
       if(usedBy(F, U, memo)) {
+        memo[V] = true;
         return true;
       }
     }
@@ -132,14 +134,18 @@ struct PromoteLegacyPass : public FunctionPass {
 
   // runOnFunction - To run this pass, first we calculate the alloca
   // instructions that are safe for promotion, then we promote each one.
-  bool runOnFunction(Function &F_to_serialize) override {
-    auto mod = CloneModule(*F_to_serialize.getParent());
+  bool runOnFunction(Function &F) override {
+
+    auto mod = CloneModule(*F.getParent());
+    Function* F_to_serialize = NULL; //pointer to F in the cloned module 
 
     // get all functions that are not F and store names
     std::vector<Function*> functions;
     for(auto &func : *mod) {
-      if(func.getName() != F_to_serialize.getName()) {
+      if(func.getName() != F.getName()) {
         functions.push_back(&func);
+      } else {
+        F_to_serialize = &func; // pointer to F in new module
       }
     }
 
@@ -151,7 +157,7 @@ struct PromoteLegacyPass : public FunctionPass {
       for(User *U : func->users()) {
         if(Instruction* call = dyn_cast<Instruction>(U)) {
           Function* caller = call->getParent()->getParent();
-          if(caller->getName() == F_to_serialize.getName()) {
+          if(caller == F_to_serialize) {
             func->deleteBody();
             used_by_F_to_serialize = true;
             break;
@@ -166,28 +172,23 @@ struct PromoteLegacyPass : public FunctionPass {
       }
     }
 
-    std::vector<GlobalVariable*> unused_globals;
-    for(auto &G : mod->globals()) { // iterate over global variables in module
-      bool used_by_F_to_serialize = false;
-
-      std::unordered_map<Value*, bool> memo;
-      for(User *U : G.users()) {
-        if(auto *I = dyn_cast<Instruction>(U)) {
-          if(I->getFunction()->getName() == F_to_serialize.getName()) {
-            G.setInitializer(NULL); 
-            used_by_F_to_serialize = true;
-            break; 
-          }
-        } 
-        if(usedBy(&F_to_serialize, U, memo)) {
-          used_by_F_to_serialize = true;
-          break;
+    std::unordered_set<Value*> values_used;
+    for(auto &BB : *F_to_serialize) {
+      for(auto &I : BB) {
+        for(auto &Op: I.operands()) {
+          values_used.insert(Op);
         }
       }
+    }
 
-      if(!used_by_F_to_serialize) {
-        unused_globals.push_back(&G);
+    std::vector<GlobalVariable*> unused_globals;
+    for(auto &G : mod->globals()) { // iterate over global variables in module
+      if(values_used.find(&G) != values_used.end()) {
+        G.setInitializer(NULL);
+        continue;
       }
+
+      unused_globals.push_back(&G);
     }
 
     // remove all global variables not used by F_to_serialize
@@ -196,32 +197,40 @@ struct PromoteLegacyPass : public FunctionPass {
       global_var->eraseFromParent();
     }
 
-    std::string Data;
-    raw_string_ostream OS(Data);
+    std::string data;
+    raw_string_ostream OS(data);
     WriteBitcodeToFile(*mod, OS);
+
+    Twine to_hash = mod->getName() + F_to_serialize->getName();
+    std::string hashed = hashString(StringRef(to_hash.str()));
+    std::string file = "/Users/peyton/UROP/CloudCompiler/data/Mem2Reg/" + hashed + ".csv";
+    StringRef file_name(file);
+
+    std::error_code EC;
+    raw_fd_ostream fd_OS(file_name, EC, llvm::sys::fs::OF_None);
+
+    fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "Mem2Reg," << data.size() << "\n";
+
     SmallVector<char> buff;
-    auto error = zlib::compress(StringRef(Data), buff, 1);
+    auto error = zlib::compress(StringRef(data), buff, 1);
     if(error) {
       abort();
     }
 
-    Twine toHash = mod->getName() + F_to_serialize.getName();
-    std::string hashed = hashString(StringRef(toHash.str()));
-    std::string file ="/Users/peyton/UROP/CloudCompiler/data/compressed/Mem2Reg/" + hashed + ".csv";
-    StringRef fileName(file);
+    std::string compressed_file ="/Users/peyton/UROP/CloudCompiler/data/compressed/Mem2Reg/" + hashed + ".csv";
+    StringRef compressed_file_name(compressed_file);
 
-    std::error_code EC;
-    raw_fd_ostream fdOS(fileName, EC, llvm::sys::fs::OF_None);
+    std::error_code compressed_EC;
+    raw_fd_ostream compressed_fd_OS(compressed_file_name, compressed_EC, llvm::sys::fs::OF_None);
+    compressed_fd_OS << mod->getName() << "," << F_to_serialize->getName() << "," << "Mem2Reg," << buff.size() << "\n";
 
-    fdOS << mod->getName() << "," << F_to_serialize.getName() << "," << "Mem2Reg," << buff.size() << "\n";
-
-    if (skipFunction(F_to_serialize))
+    if (skipFunction(F))
       return false;
 
     DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     AssumptionCache &AC =
-        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F_to_serialize);
-    return promoteMemoryToRegister(F_to_serialize, DT, AC);
+        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
+    return promoteMemoryToRegister(F, DT, AC);
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
